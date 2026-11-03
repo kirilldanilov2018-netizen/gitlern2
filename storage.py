@@ -1,86 +1,53 @@
 import json
 import os
+import tempfile
 
-FILE = "tasks.json"
+DEFAULT_FILE = "tasks.json"
 
 
-def load_tasks():
-    if not os.path.exists(FILE):
+class StorageError(Exception):
+    """Ошибка чтения/записи хранилища задач."""
+
+
+def load_tasks(path=DEFAULT_FILE):
+    """Читает задачи из JSON. Возвращает [] если файла нет.
+
+    Бросает StorageError, если файл повреждён или содержит не список.
+    """
+    if not os.path.exists(path):
         return []
-    with open(FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except json.JSONDecodeError as e:
+        raise StorageError(f"Файл {path} повреждён: {e}") from e
+
+    if not isinstance(data, list):
+        raise StorageError(
+            f"Ожидался список задач в {path}, получено {type(data).__name__}"
+        )
+    return data
 
 
-def save_tasks(tasks):
-    with open(FILE, "w", encoding="utf-8") as f:
-        json.dump(tasks, f, ensure_ascii=False, indent=2)
-def add_task(title):
-    """Добавляет новую задачу и возвращает её."""
-    tasks = load_tasks()
-    task = {
-        "id": max((t["id"] for t in tasks), default=0) + 1,
-        "title": title,
-        "done": False,
-        "created_at": datetime.now().isoformat(timespec="seconds"),
-    }
-    tasks.append(task)
-    save_tasks(tasks)
-    return task
+def save_tasks(tasks, path=DEFAULT_FILE):
+    """Атомарно сохраняет список задач в JSON.
 
+    Пишет во временный файл в той же директории и делает os.replace —
+    это атомарная операция на POSIX и Windows. Так при падении
+    процесса старый файл остаётся целым.
+    """
+    if not isinstance(tasks, list):
+        raise StorageError("tasks должен быть списком")
 
-def list_tasks(show_done=True):
-    """Возвращает список задач (по умолчанию — все)."""
-    tasks = load_tasks()
-    if not show_done:
-        tasks = [t for t in tasks if not t["done"]]
-    return tasks
-
-
-def complete_task(task_id):
-    """Помечает задачу выполненной. True — если нашлась."""
-    tasks = load_tasks()
-    for t in tasks:
-        if t["id"] == task_id:
-            t["done"] = True
-            save_tasks(tasks)
-            return True
-    return False
-
-
-def delete_task(task_id):
-    """Удаляет задачу. True — если нашлась."""
-    tasks = load_tasks()
-    new_tasks = [t for t in tasks if t["id"] != task_id]
-    if len(new_tasks) == len(tasks):
-        return False
-    save_tasks(new_tasks)
-    return True
-
-
-def main(argv):
-    if len(argv) < 2:
-        print("Usage: python tasks.py {add|list|done|del} [args]")
-        return 1
-
-    cmd = argv[1]
-    if cmd == "add" and len(argv) >= 3:
-        task = add_task(" ".join(argv[2:]))
-        print(f"Added #{task['id']}: {task['title']}")
-    elif cmd == "list":
-        for t in list_tasks():
-            mark = "✔" if t["done"] else " "
-            print(f"[{mark}] #{t['id']} {t['title']}")
-    elif cmd == "done" and len(argv) >= 3:
-        ok = complete_task(int(argv[2]))
-        print("OK" if ok else "Not found")
-    elif cmd == "del" and len(argv) >= 3:
-        ok = delete_task(int(argv[2]))
-        print("Deleted" if ok else "Not found")
-    else:
-        print("Unknown command")
-        return 1
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    dir_name = os.path.dirname(os.path.abspath(path))
+    fd, tmp_path = tempfile.mkstemp(dir=dir_name, prefix=".tasks-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(tasks, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())  # гарантируем, что данные на диске
+        os.replace(tmp_path, path)  # атомарная замена
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
